@@ -34,6 +34,7 @@
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
 #include "vfd.h"
+#include <time.h>
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -50,17 +51,33 @@ static uint8_t bits = 8;
 static uint32_t speed = 500000;
 static uint16_t delay;
 
-void transfer(int fd, uint8_t *tx, int size)
+void transfer(int fd, char *data, int size)
 {
   int ret;
-  uint8_t *rx;
-  rx = (uint8_t*)malloc(size);
-  
+  char *rx, *tx;
+  rx = (char*)malloc(size + 1);
+  if(NULL == rx)
+  {
+    return;
+  }
+  tx = (char*)malloc(size + 1);
+  if(NULL == tx)
+  {
+    free(rx);
+    return;
+  }
+
+  int cnt = 0;
+  for(cnt= 0; cnt < size; cnt++)
+  {
+    tx[cnt + 1] = data[cnt];
+  }
+  tx[0] = VFD_SPIDATA;
   struct spi_ioc_transfer tr = 
   {
     .tx_buf = (unsigned long)tx,
     .rx_buf = (unsigned long)rx,
-    .len = ARRAY_SIZE(tx),
+    .len = size + 1,
     .delay_usecs = delay,
     .speed_hz = speed,
     .bits_per_word = bits,
@@ -99,6 +116,58 @@ void send_command(int fd, uint8_t value)
   }
 }
 
+void update_time(int fd)
+{
+  static int oldSeconds = 0;
+  static int oldMinutes = 0;
+  static int oldHours = 0;
+  int update = 0;
+  char timeString[20];
+  time_t t = time(NULL);
+  struct tm lt = *localtime(&t);
+  if(lt.tm_sec != oldSeconds)
+  {
+    update = 1;
+    oldSeconds = lt.tm_sec;
+  }
+  if(lt.tm_min != oldMinutes)
+  {
+    update = 1;
+    oldMinutes = lt.tm_min;
+  }
+  if(lt.tm_hour != oldHours)
+  {
+    update = 1;
+    oldHours = lt.tm_hour;
+  }
+  if(1 == update)
+  {
+    int size;
+    size = sprintf(&timeString, "%d : %d : %d", lt.tm_hour, lt.tm_min, lt.tm_sec);
+    int cnt = 19;
+    int shift = (20 - size) >> 1;
+    while(cnt)
+    {
+      if(cnt >= (size + shift))
+      {
+        timeString[cnt] = ' ';
+      }
+      else
+      {
+        timeString[cnt] = timeString[cnt - shift];
+        if(cnt < shift)
+        {
+          timeString[cnt] = ' ';
+        }
+      }
+      cnt--;
+    }
+    timeString[0] = ' ';
+    send_command(fd, VFD_SETDDRAMADDR | 0x40);
+    transfer(fd, timeString, 20);    
+  }
+}
+
 void init_VFD(int fd)
 {
   // Our display has two lines + set brightness to 100%
@@ -110,13 +179,13 @@ void init_VFD(int fd)
   send_command(fd, VFD_DISPLAYCONTROL | VFD_DISPLAYON);
   // Clear the display: this function takes a while to execute
   send_command(fd, VFD_CLEARDISPLAY);
-  sleep(2);
+//  sleep(2);
   // Set the cursor to the home position: this function takes a while to execute
   send_command(fd, VFD_RETURNHOME);
-  sleep(2);
+//  sleep(2);
   // Write the key functions to the lower line of the display
   send_command(fd, VFD_SETDDRAMADDR | 0x40);
-  transfer(fd, "LOVE HATE BORED SKIP", 20);
+  transfer(fd, "                    ", 20);
 }
 
 void  scroll(int fd, char* displayBuff, int size)
@@ -131,6 +200,7 @@ void  scroll(int fd, char* displayBuff, int size)
   {
     // the message fits on the screen: no need to scroll it
     transfer(fd, displayBuff, size);
+    update_time(fd);
   }
   else
   {
@@ -138,12 +208,26 @@ void  scroll(int fd, char* displayBuff, int size)
     // message is longer than the screen: let's scroll it!
     // First, pad the existing buffer with a screenful of spaces.
     displayBuff = realloc(displayBuff, size + 20);
+    // Fill the addition with spaces
+    for(cnt = size - 1; cnt < size + 20; cnt++)
+    {
+      displayBuff[cnt] = ' ';
+    }
     // scroll by walking through the string
     for(cnt = 0; cnt < size; cnt++)
     {
       send_command(fd, VFD_SETDDRAMADDR);
       transfer(fd, &displayBuff[cnt], 20);
-      sleep(200);
+      if(0 == cnt)
+      {
+        usleep(1000000);
+        update_time(fd);
+      }
+      else
+      {
+        usleep(200000);
+        update_time(fd);
+      }
     }
   }
 }
@@ -151,7 +235,7 @@ void  scroll(int fd, char* displayBuff, int size)
 int read_file(int fd)
 {
   FILE* rfp;
-  rfp = fopen("/root/.config/pianobar/eventcmd", "r");
+  rfp = fopen("/root/.config/pianobar/nowplaying", "r");
   if(rfp)
   {
     // Read the line (the file only has one) and send it to be scrolled 
